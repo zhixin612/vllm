@@ -1,3 +1,4 @@
+import time
 from contextlib import contextmanager
 from typing import ClassVar, List, Optional, Sequence, Union, cast, overload
 
@@ -552,7 +553,10 @@ class LLM:
         outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
         total_in_toks = 0
         total_out_toks = 0
+        _start = time.time()
         while self.llm_engine.has_unfinished_requests():
+            # logger.warning('[DEV] call LLMEngine.step(), time = %.3f ms', 1000*(time.time() - _start))
+            _start = time.time()
             step_outputs = self.llm_engine.step()
             for output in step_outputs:
                 if output.finished:

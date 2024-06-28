@@ -762,6 +762,8 @@ class LLMEngine:
             >>>     if not (engine.has_unfinished_requests() or example_inputs):
             >>>         break
         """
+        # logger.warning('[DEV] llm_engine.step()')
+
         seq_group_metadata_list, scheduler_outputs = self.scheduler.schedule()
 
         if not scheduler_outputs.is_empty():
