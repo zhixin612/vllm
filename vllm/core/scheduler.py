@@ -85,6 +85,11 @@ class SchedulingBudget:
         if req_id in self._request_ids_num_curr_seqs:
             return
 
+        # [Zhixin] fix AssertionError (#1043 assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs)
+        if self.num_curr_seqs >= self.max_num_seqs:
+            logger.error(f"Number of current sequences {self.num_curr_seqs} exceeds max_num_seqs {self.max_num_seqs}.")
+            return
+
         self._request_ids_num_curr_seqs.add(req_id)
         self._num_curr_seqs += num_curr_seqs
 
@@ -998,8 +1003,11 @@ class Scheduler:
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
         for seq_group in self.running:
-            budget.add_num_seqs(seq_group.request_id,
-                                seq_group.get_max_num_running_seqs())
+            budget.add_num_seqs(seq_group.request_id, seq_group.get_max_num_running_seqs())
+
+        if budget.num_curr_seqs > self.scheduler_config.max_num_seqs:
+            logger.warning(f"[Zhixin] Budget size (seqs): {budget.num_curr_seqs}")
+
         curr_loras = set(
             seq_group.lora_int_id for seq_group in self.running
             if seq_group.lora_int_id > 0) if self.lora_enabled else None
@@ -1010,12 +1018,9 @@ class Scheduler:
 
         # If any requests are swapped, prioritized swapped requests.
         if not self.swapped:
-            prefills = self._schedule_prefills(budget,
-                                               curr_loras,
-                                               enable_chunking=False)
+            prefills = self._schedule_prefills(budget, curr_loras, enable_chunking=False)
 
-        if len(prefills.seq_groups
-               ) == 0 and self.scheduler_config.policy == "priority":
+        if len(prefills.seq_groups) == 0 and self.scheduler_config.policy == "priority":
             self._schedule_priority_preemption(budget)
 
         # Don't schedule decodes if prefills are scheduled.
@@ -1032,9 +1037,8 @@ class Scheduler:
                     running_scheduled.swapped_out) == 0:
                 swapped_in = self._schedule_swapped(budget, curr_loras)
 
-        assert (budget.num_batched_tokens <=
-                self.scheduler_config.max_num_batched_tokens)
-        assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
+        assert budget.num_batched_tokens <= self.scheduler_config.max_num_batched_tokens, "Exceeded max_num_batched_tokens"
+        assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs, "Exceeded max_num_seqs"
 
         # Update waiting requests.
         self.waiting.extendleft(running_scheduled.preempted)
@@ -1072,6 +1076,9 @@ class Scheduler:
 
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
+
+        # logger.warning(f"[Zhixin] vllm.core.scheduler num_curr_seqs={budget.num_curr_seqs} "
+        #                f"total_scheduled_seqs={sum([len(s.seq_group.get_seqs()) for s in scheduled_seq_groups])}")
 
         return SchedulerOutputs(
             scheduled_seq_groups=scheduled_seq_groups,

@@ -1360,6 +1360,9 @@ class LLMEngine:
         assert scheduler_outputs is not None
 
         if not scheduler_outputs.is_empty():
+            # [Zhixin] debug
+            # logger.info(f"Num of seq_group in step: {len(seq_group_metadata_list)}")
+
             finished_requests_ids = self.scheduler[
                 virtual_engine].get_and_reset_finished_requests_ids()
 
