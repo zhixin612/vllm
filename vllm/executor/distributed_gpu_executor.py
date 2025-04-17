@@ -25,7 +25,7 @@ class DistributedGPUExecutor(GPUExecutor):
 
         super().__init__(*args, **kwargs)
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self, engine_type='no_constraints') -> Tuple[int, int]:
         """Determine the number of available KV blocks.
 
         This invokes `determine_num_available_blocks` on each worker and takes
@@ -36,7 +36,7 @@ class DistributedGPUExecutor(GPUExecutor):
             - tuple[num_gpu_blocks, num_cpu_blocks]
         """
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
-        num_blocks = self._run_workers("determine_num_available_blocks", )
+        num_blocks = self._run_workers("determine_num_available_blocks", engine_type=engine_type)
 
         # Since we use a shared centralized controller, we take the minimum
         # number of blocks across all workers to make sure all the memory

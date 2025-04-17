@@ -107,7 +107,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
 
     # keep this method for `empty_cache` and `synchronize` api
     @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self, engine_type='no_constraints') -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 

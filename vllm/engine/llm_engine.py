@@ -233,6 +233,7 @@ class LLMEngine:
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         use_cached_outputs: bool = False,
+        engine_type: str = "no_constraints",
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -303,6 +304,7 @@ class LLMEngine:
         )
         self.log_stats = log_stats
         self.use_cached_outputs = use_cached_outputs
+        self.engine_type = engine_type
 
         if not self.model_config.skip_tokenizer_init:
             self.tokenizer = self._init_tokenizer()
@@ -480,7 +482,7 @@ class LLMEngine:
         and the swap CPU cache.
         """
         num_gpu_blocks, num_cpu_blocks = (
-            self.model_executor.determine_num_available_blocks())
+            self.model_executor.determine_num_available_blocks(engine_type=self.engine_type))
 
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override

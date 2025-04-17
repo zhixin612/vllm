@@ -285,7 +285,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                                    virtual_engine=virtual_engine)
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self, engine_type='no_constraints') -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens

@@ -1196,7 +1196,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         return builder.build()  # type: ignore
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self, engine_type='no_constraints') -> None:
+        logger.info(f'[Zhixin] start profile run on {engine_type} instance')
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
@@ -1251,8 +1252,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         batch_size = 0
         for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
+            # TODO(Zhixin): check correctness of the following logic (how to construct a decode batch?)
+            if engine_type == 'decode':
+                seq_len = 1
+            # TODO(Zhixin): support prefill memory optimization
+            else:
+                seq_len = (max_num_batched_tokens // max_num_seqs +
+                           (group_id < max_num_batched_tokens % max_num_seqs))
+
             batch_size += seq_len
 
             seq_data, dummy_multi_modal_data = self.input_registry \
@@ -1288,6 +1295,40 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
+
+        """ [Zhixin] model_input
+        ModelInputForGPUWithSamplingMetadata(
+            input_tokens:       tensor(BS), 
+            input_positions:    tensor(BS),         # [0, 1, ... n-1, 0, 1, ..., n-1, ...]
+            seq_lens:           List(NUM_SEQS),     # [n, n, ..., n]
+            query_lens:         List(NUM_SEQS),     # [n, n, ..., n]
+            attn_metadata=FlashAttentionMetadata(
+                num_prefills:       NUM_SEQS, 
+                num_prefill_tokens: BS, 
+                num_decode_tokens:  0, 
+                slot_mapping:       tensor(BS),     # [-1, -1, -1, ...]
+                seq_lens            List(NUM_SEQS), 
+                seq_lens_tensor:    tensor(NUM_SEQS), 
+                max_query_len:          int=MAX_TOKEN/MAX_SEQS, 
+                max_decode_query_len:   int=1, 
+                max_prefill_seq_len:    int=MAX_TOKEN/MAX_SEQS, 
+                max_decode_seq_len:     int=0, 
+                query_start_loc:    tensor(NUM_SEQS),   # [0, 4, 9, ...] 
+                seq_start_loca:     tensor(NUM_SEQS),   # [0, 4, 9, ...]
+                context_lens_tensor:tensor(NUM_SEQS),   # [0, 0, 0, ...]
+                block_tables:       tensor(NUM_SEQS, 0),  # [[], [], [], ...]
+            ), 
+            request_ids_to_seq_ids: Dict(str, List(int)), 
+            finished_requests_ids:  List(str), 
+            scheduler_outputs:      None, 
+            sampling_metadata=SamplingMetadata(
+                seq_groups:             List(SequenceGroupToSample), 
+                selected_token_indices: tensor(NUM_SEQS)  # [0, 4, 9, ...] 
+            ), 
+            is_prompt=True
+        )
+        """
+
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = self.model.make_empty_intermediate_tensors(
@@ -1392,15 +1433,15 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         per sequence in the batch.
         """
         assert not self.model_config.enforce_eager
-        logger.info("Capturing the model for CUDA graphs. This may lead to "
-                    "unexpected consequences if the model is not static. To "
-                    "run the model in eager mode, set 'enforce_eager=True' or "
-                    "use '--enforce-eager' in the CLI.")
-        logger.info("CUDA graphs can take additional 1~3 GiB memory per GPU. "
-                    "If you are running out of memory, consider decreasing "
-                    "`gpu_memory_utilization` or enforcing eager mode. "
-                    "You can also reduce the `max_num_seqs` as needed "
-                    "to decrease memory usage.")
+        # logger.info("Capturing the model for CUDA graphs. This may lead to "
+        #             "unexpected consequences if the model is not static. To "
+        #             "run the model in eager mode, set 'enforce_eager=True' or "
+        #             "use '--enforce-eager' in the CLI.")
+        # logger.info("CUDA graphs can take additional 1~3 GiB memory per GPU. "
+        #             "If you are running out of memory, consider decreasing "
+        #             "`gpu_memory_utilization` or enforcing eager mode. "
+        #             "You can also reduce the `max_num_seqs` as needed "
+        #             "to decrease memory usage.")
         start_time = time.perf_counter()
 
         # Prepare dummy inputs. These will be reused for all batch sizes.

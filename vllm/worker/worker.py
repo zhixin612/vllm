@@ -202,7 +202,7 @@ class Worker(LocalOrDistributedWorkerBase):
             tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self, engine_type='no_constraints') -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 
@@ -220,7 +220,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        self.model_runner.profile_run()
+        self.model_runner.profile_run(engine_type=engine_type)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -251,6 +251,15 @@ class Worker(LocalOrDistributedWorkerBase):
             self.model_runner.remove_all_loras()
         gc.collect()
         torch.cuda.empty_cache()
+
+        logger.warning(f'[Zhixin] memory info: init | peak | free | available: '
+                       f'{self.init_gpu_memory/1024**3:.2f}GB | '
+                       f'{peak_memory/1024**3:.2f}GB | '
+                       f'{free_gpu_memory/1024**3:.2f}GB | '
+                       f'{(total_gpu_memory * self.cache_config.gpu_memory_utilization - peak_memory)/1024**3:.2f}GB')
+        logger.warning(f'[Zhixin] block_size = {cache_block_size/1024**2:.2f}MB')
+        logger.warning(f'[Zhixin] num_gpu_blocks = {num_gpu_blocks}, num_cpu_blocks = {num_cpu_blocks}')
+
         return num_gpu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,

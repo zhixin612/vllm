@@ -279,7 +279,7 @@ class RayTPUExecutor(TPUExecutor):
         async_run_remote_workers_only to complete."""
         ray.get(parallel_worker_tasks)
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self, engine_type='no_constraints') -> Tuple[int, int]:
         num_blocks = self._run_workers("determine_num_available_blocks", )
         num_tpu_blocks = min(b[0] for b in num_blocks)
         num_cpu_blocks = min(b[1] for b in num_blocks)

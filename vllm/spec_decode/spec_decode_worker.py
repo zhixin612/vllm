@@ -349,7 +349,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.proposer_worker.set_include_gpu_probs_tensor()
         self.proposer_worker.set_should_modify_greedy_probs_inplace()
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self, engine_type='no_constraints') -> Tuple[int, int]:
         """Determine the number of cache blocks to use.
 
         This is done by profiling the scorer model (which is typically the

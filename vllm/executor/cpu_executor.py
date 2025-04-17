@@ -194,7 +194,7 @@ class CPUExecutor(ExecutorBase):
         return [driver_worker_output
                 ] + [output.get() for output in worker_outputs]
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self, engine_type='no_constraints') -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """

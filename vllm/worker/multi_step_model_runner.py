@@ -657,7 +657,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                               tensorizer_config: TensorizerConfig) -> None:
         return self._base_model_runner.save_tensorized_model(tensorizer_config)
 
-    def profile_run(self) -> None:
+    def profile_run(self, engine_type='no_constraints') -> None:
         return self._base_model_runner.profile_run()
 
     def remove_all_loras(self):

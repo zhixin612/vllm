@@ -44,7 +44,7 @@ class NonLLMProposerWorkerBase(ProposerWorkerBase, ABC):
         """get_spec_proposals is used to get the proposals"""
         return []
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self, engine_type='no_constraints') -> Tuple[int, int]:
         """This is never called on the proposer, only the target model"""
         raise NotImplementedError
 
