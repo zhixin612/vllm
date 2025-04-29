@@ -1,0 +1,24 @@
+global:
+  scrape_interval: 1s # Set the scrape interval to every 15 seconds. Default is every 1 minute.
+  evaluation_interval: 1s # Evaluate rules every 15 seconds. The default is every 1 minute.
+  # scrape_timeout is set to the global default (10s).
+
+# Load rules once and periodically evaluate them according to the global 'evaluation_interval'.
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  - job_name: "vllm-prefill"
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ["localhost:9000"]
+        labels:
+          role: "prefill"
+
+  - job_name: "vllm-decode"
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ["localhost:9001"]
+        labels:
+          role: "prefill"
