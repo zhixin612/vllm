@@ -149,6 +149,10 @@ def merge_attn_states(output: torch.Tensor,
                                    prefix_lse, suffix_output, suffix_lse)
 
 
+# custom gemm
+def custom_gemm(C: torch.Tensor, A: torch.Tensor, B: torch.Tensor) -> None:
+    torch.ops._C.custom_gemm(C, A, B)
+
 # pos encoding ops
 def rotary_embedding(
     positions: torch.Tensor,

@@ -79,6 +79,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("merge_attn_states", torch::kCUDA, &merge_attn_states);
 #endif
 
+#ifndef USE_ROCM
+  ops.def("custom_gemm(Tensor! C, Tensor A, Tensor B) -> ()");
+  ops.impl("custom_gemm", torch::kCUDA, &custom_gemm);
+#endif
+
   // Activation ops
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! out, Tensor input) -> ()");

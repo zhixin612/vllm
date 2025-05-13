@@ -6,6 +6,8 @@
 #include "core/scalar_type.hpp"
 
 #include <vector>
+#include <ATen/core/interned_strings.h>
+#include <torch/serialize/input-archive.h>
 
 torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
   // Ensure tensor is on CUDA
@@ -60,6 +62,13 @@ void merge_attn_states(torch::Tensor& output,
                        const torch::Tensor& suffix_output,
                        const torch::Tensor& suffix_lse);
 #endif
+
+#ifndef USE_ROCM
+void custom_gemm(torch::Tensor& C,
+                 torch::Tensor& A,
+                 torch::Tensor& B);
+#endif
+
 
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);
