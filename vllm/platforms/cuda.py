@@ -227,6 +227,9 @@ class CudaPlatformBase(Platform):
             logger.info("Using DualChunkFlashAttention backend.")
             return ("vllm.attention.backends.dual_chunk_flash_attn."
                     "DualChunkFlashAttentionBackend")
+        elif selected_backend == _Backend.PREFIX_ATTN:
+            logger.info("Using PREFIX_ATTN backend.")
+            return "vllm.attention.backends.prefix_attn.PrefixAttentionBackend"
         elif selected_backend == _Backend.FLASH_ATTN:
             pass
         elif selected_backend:
