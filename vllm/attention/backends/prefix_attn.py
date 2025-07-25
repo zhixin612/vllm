@@ -1,4 +1,5 @@
 """Attention layer with PrefixAttention."""
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
@@ -30,7 +31,8 @@ from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
 
 from prefix_attn import prefix_attn_with_kvcache, schedule, schedule_naive
-from prefix_attn.data_class import PackedBox
+from prefix_attn.data_class import PackedBox, KernelInfo
+from prefix_attn.prefix_tree import PrefixTree
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -39,8 +41,32 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class PrefixAttentionBackend(AttentionBackend):
+class Timer:
+    def __init__(self, name, sync_gpu=False, disable: bool = False):
+        self.name = name
+        self.sync_gpu = sync_gpu
+        self.disable = disable
 
+    def __enter__(self):
+        if self.disable:
+            return self
+        if self.sync_gpu:
+            torch.cuda.synchronize()
+        self.start_time = time.perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        if self.disable:
+            return
+        if self.sync_gpu:
+            torch.cuda.synchronize()
+        self.end_time = time.perf_counter()
+        self.elapsed_time_s = self.end_time - self.start_time
+        self.elapsed_time_ms = self.elapsed_time_s * 1000
+        logger.info(f"[TIMER] {self.name}: {self.elapsed_time_ms:.4f} ms")
+
+
+class PrefixAttentionBackend(AttentionBackend):
     # TODO(zhixin) double check this
     accept_output_buffer: bool = True
 
@@ -149,7 +175,7 @@ class PrefixAttentionMetadata(AttentionMetadata):
 
     # prefix_attn.data_class.PackedBox
     # used only for decode attention metadata
-    packed_box: Optional[PackedBox]
+    packed_box: Optional[KernelInfo]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
@@ -282,23 +308,35 @@ class PrefixAttentionMetadata(AttentionMetadata):
         # Compute some attn_metadata fields which default to None
         slot_mapping = (None if self.slot_mapping is None else
                         self.slot_mapping[self.num_prefill_tokens:])
-        seq_lens_tensor = (None if self.seq_lens_tensor is None else
-                           self.seq_lens_tensor[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[self.num_prefills:])
-        logger.info(f'[zhixin] (A) original block table: \n{block_tables}'
-                    f'\nseq_lens: {seq_lens_tensor}')
 
+        ### Prepare attn metadata for prefix attention
         # Fixme(zhixin): use box.sort_by_kv_desc() ?
-        # box: PackedBox = schedule_naive(self.seq_lens[self.num_prefills:], block_tables, non_blocking=True)
-        box: PackedBox = schedule(self.seq_lens[self.num_prefills:],
-                                  block_tables,
-                                  block_size=self.block_size,
-                                  k=64//(self.nheads//self.nheads_kv) if self.nheads_kv is not None else 64)
-        box.to_tensor(device=self.block_tables.device)
-        logger.info(f'[zhixin] (B) original block table: \n{block_tables}'
-                    f'\nseq_lens: {seq_lens_tensor}')
-        logger.info(f'[zhixin] PrefixAttentionMetadata (decode_metadata): \n{box}')
+        # _start = time.perf_counter()
+
+        ### policy-1: normal schedule
+        # with Timer("normal schedule", True):
+        #     box: KernelInfo = schedule(self.seq_lens[self.num_prefills:], block_tables, block_size=self.block_size,
+        #                                k=64 // (self.nheads // self.nheads_kv) if self.nheads_kv is not None else 64,
+        #                                qkv_tile_types=None)
+        #     box.to_tensor(device=self.block_tables.device)
+
+        ## # policy-2: naive schedule
+        # box: KernelInfo = schedule_naive(self.seq_lens[self.num_prefills:], block_tables)
+
+        ### policy-3: tree schedule
+        with Timer("tree schedule", sync_gpu=True, disable=True):
+            MNWs = [[64, 128, 4], [64, 64, 4], [64, 32, 4], [64, 16, 4],
+                    [32, 128, 2], [32, 64, 2], [32, 32, 2], [32, 16, 2],
+                    [16, 128, 1], [16, 64, 1], [16, 32, 1], [16, 16, 1]]
+            block_tables_cpu = block_tables.cpu().tolist()
+            tree = PrefixTree(self.block_size)
+            tree.build_tree(np.arange(self.num_decode_tokens), block_tables_cpu)
+            box: KernelInfo = tree.pack_schedule(MNWs, self.nheads // self.nheads_kv if self.nheads_kv is not None else 64)
+            box.to_tensor(device=self.block_tables.device)
+
+        # logger.info(f"[zhixin] schedule time: {1000*(time.perf_counter() - _start):.4f} ms")
 
         self._cached_decode_metadata = PrefixAttentionMetadata(
             num_prefills=0,
@@ -308,7 +346,7 @@ class PrefixAttentionMetadata(AttentionMetadata):
             multi_modal_placeholder_index_maps=None,
             enable_kv_scales_calculation=True,
             seq_lens=None,
-            seq_lens_tensor=seq_lens_tensor,
+            seq_lens_tensor=None,
             max_decode_query_len=self.max_decode_query_len,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
@@ -322,7 +360,7 @@ class PrefixAttentionMetadata(AttentionMetadata):
             seq_start_loc=self.seq_start_loc[self.num_prefills:]
             if self.seq_start_loc is not None else None,
             context_lens_tensor=None,
-            block_tables=block_tables,
+            block_tables=block_tables,  # used for comparison only
             block_size=self.block_size,
             use_cuda_graph=self.use_cuda_graph,
             packed_box=box,
@@ -335,9 +373,83 @@ class PrefixAttentionMetadata(AttentionMetadata):
             cross_block_tables=self.cross_block_tables)
         return self._cached_decode_metadata
 
+    # zhixin: support multi-step inference
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
+        """
+        Update metadata in-place to advance one decode step.
+        """
+        # When using cudagraph, the num_seqs is padded to the next captured
+        # batch sized, but num_queries tracks the actual number of requests in
+        # the batch. For --enforce-eager mode, num_seqs == num_queries
+        if num_seqs != num_queries:
+            assert num_seqs > num_queries
+            assert self.use_cuda_graph
+
+        if turn_prefills_into_decodes:
+            # When Multi-Step is enabled with Chunked-Prefill, prefills and
+            # decodes are scheduled together. In the first step, all the
+            # prefills turn into decodes. This update reflects that
+            # conversion.
+            assert self.num_decode_tokens + self.num_prefills == num_seqs
+            self.num_decode_tokens += self.num_prefills
+            self.num_prefills = 0
+            self.num_prefill_tokens = 0
+            self.max_prefill_seq_len = 0
+            self.max_query_len = 1
+
+            self.slot_mapping = self.slot_mapping[:num_seqs]
+        else:
+            assert self.seq_lens is not None
+            assert self.max_decode_seq_len == max(self.seq_lens)
+
+        assert self.num_prefills == 0
+        assert self.num_prefill_tokens == 0
+        assert self.num_decode_tokens == num_seqs
+        assert self.slot_mapping.shape == (num_seqs, )
+
+        assert self.seq_lens is not None
+        assert len(self.seq_lens) == num_seqs
+        assert self.seq_lens_tensor is not None
+        assert self.seq_lens_tensor.shape == (num_seqs, )
+        assert self.max_query_len == 1
+        assert self.max_prefill_seq_len == 0
+
+        assert self.query_start_loc is not None
+        assert self.query_start_loc.shape == (num_queries + 1, )
+        assert self.seq_start_loc is not None
+        assert self.seq_start_loc.shape == (num_seqs + 1, )
+
+        assert self.context_lens_tensor is not None
+        assert self.context_lens_tensor.shape == (num_queries, )
+
+        assert self.block_tables is not None
+        assert self.block_tables.shape[0] == num_seqs
+
+        # Update query lengths. Note that we update only queries and not seqs,
+        # since tensors may be padded due to captured cuda graph batch size
+        for i in range(num_queries):
+            self.seq_lens[i] += 1
+        self.max_decode_seq_len = max(self.seq_lens)
+
+        ops.advance_step_flashattn(num_seqs=num_seqs,
+                                   num_queries=num_queries,
+                                   block_size=block_size,
+                                   input_tokens=model_input.input_tokens,
+                                   sampled_token_ids=sampled_token_ids,
+                                   input_positions=model_input.input_positions,
+                                   seq_lens=self.seq_lens_tensor,
+                                   slot_mapping=self.slot_mapping,
+                                   block_tables=self.block_tables)
+
 
 class PrefixAttentionMetadataBuilder(
-        AttentionMetadataBuilder[PrefixAttentionMetadata]):
+    AttentionMetadataBuilder[PrefixAttentionMetadata]):
 
     def __init__(self, input_builder: "ModelInputForGPUBuilder"):
         self.input_builder = input_builder
@@ -689,7 +801,7 @@ class PrefixAttentionImpl(AttentionImpl):
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
         decode_query = query[num_prefill_query_tokens:]
-        decode_output = output[num_prefill_query_tokens:]
+        decode_output = output[num_prefill_query_tokens:]  # [B, N, d]
         # QKV for prefill.
         query = query[:num_prefill_query_tokens]
         prefill_output = output[:num_prefill_query_tokens]
@@ -746,61 +858,118 @@ class PrefixAttentionImpl(AttentionImpl):
                     out=prefill_output
                 )
 
+        # _event_0 = torch.cuda.Event(enable_timing=True)
+        # _event_1 = torch.cuda.Event(enable_timing=True)
+        # _event_2 = torch.cuda.Event(enable_timing=True)
+        # _event_3 = torch.cuda.Event(enable_timing=True)
+        # _event_4 = torch.cuda.Event(enable_timing=True)
+        # torch.cuda.synchronize(query.device)
+        # _event_0.record()
+
         # set num heads for prefix scheduling
         attn_metadata.nheads = self.num_heads
         attn_metadata.nheads_kv = self.num_kv_heads
         if decode_meta := attn_metadata.decode_metadata:
+            # _event_1.record()
             assert decode_meta.max_decode_query_len <= 1, \
-            "Speculative decoding with variable length queries is not supported yet."
-            # Use prefix_attn_with_kvcache for normal decoding.
-            (seq_lens_arg, _, block_tables_arg) = (
-                get_seq_len_block_table_args(decode_meta, False, attn_type))
-
-            flash_attn_with_kvcache(
-                q=decode_query.unsqueeze(1),    # [B, 1, n, d]
-                k_cache=key_cache,              # [n_blocks, block_size, n_kv, d]
-                v_cache=value_cache,            # [n_blocks, block_size, n_kv, d]
-                block_table=block_tables_arg,   # [batch_size, max_blocks]
-                cache_seqlens=seq_lens_arg,     # [batch_size]
-                softmax_scale=softmax_scale,
-                causal=True,
-                out=decode_output.unsqueeze(1), # [B, 1, n, d]
-            )
+                "Speculative decoding with variable length queries is not supported yet."
 
             box = decode_meta.packed_box
+            # _event_2.record()
 
-            out = prefix_attn_with_kvcache(
-                q=decode_query[box.sort_index].unsqueeze(1),
+            ### wrong implementation
+            # out_tmp = torch.zeros_like(decode_query)
+            # prefix_attn_with_kvcache(
+            #     # q=decode_query.unsqueeze(1),  # [B, 1, N, d]
+            #     q=decode_query[box.sort_index].unsqueeze(1) if box.sort_index is not None else decode_query.unsqueeze(1),
+            #     k_cache_paged=key_cache,
+            #     v_cache_paged=value_cache,
+            #     num_split_per_seq=box.num_split_per_seq,
+            #     query_tables=box.q_tables,
+            #     block_tables=box.block_tables,
+            #     num_seqs_per_CTAs=box.num_seqs_per_CTAs,
+            #     CTA_ranks=box.CTA_ranks,
+            #     kv_in_CTAs=box.kv_in_CTAs,
+            #     MNW=box.MNWs,
+            #     max_split_per_seq=box.max_split_per_seq,
+            #     max_seqs_in_CTA=box.max_seqs_in_CTA,
+            #     max_blocks_in_CTA=box.max_blocks_in_CTA,
+            #     softmax_scale=softmax_scale,
+            #     out=out_tmp.unsqueeze(1),
+            #     timing_=None
+            # )
+            # # _event_3.record()
+            # if box.reverse_index is not None:
+            #     decode_output = out_tmp[box.reverse_index]
+
+
+            ### prefix-attn with kvcache
+            # NOTE(zhixin): model_runner#1772 could also sort queries and outputs
+            prefix_attn_with_kvcache(
+                # q=decode_query.unsqueeze(1),  # [B, 1, N, d]
+                q=decode_query[box.sort_index].unsqueeze(1) if box.sort_index is not None else decode_query.unsqueeze(1),
                 k_cache_paged=key_cache,
                 v_cache_paged=value_cache,
-                query_tables=box.q_table,
-                block_tables=box.block_table,
-                num_seqs_per_CTA=box.num_seqs_per_CTA,
                 num_split_per_seq=box.num_split_per_seq,
-                CTA_rank=box.CTA_rank,
-                kv_in_CTA=box.kv_in_CTA,
+                query_tables=box.q_tables,
+                block_tables=box.block_tables,
+                num_seqs_per_CTAs=box.num_seqs_per_CTAs,
+                CTA_ranks=box.CTA_ranks,
+                kv_in_CTAs=box.kv_in_CTAs,
+                MNW=box.MNWs,
                 max_split_per_seq=box.max_split_per_seq,
                 max_seqs_in_CTA=box.max_seqs_in_CTA,
                 max_blocks_in_CTA=box.max_blocks_in_CTA,
                 softmax_scale=softmax_scale,
+                out=decode_output.unsqueeze(1),
+                timing_=None
             )
-            if decode_meta.packed_box.reverse_index is not None:
-                out = out[decode_meta.packed_box.reverse_index]
-            out = out.squeeze()
+            # _event_3.record()
+            if box.reverse_index is not None:
+                decode_output = decode_output[box.reverse_index]
 
-            # logger.info(f'[zhixin] max diff (pa-fa): {(out - decode_output).abs().max()}')
-            logger.info(f'[zhixin] mean diff (pa-fa): {(out - decode_output).abs().mean()}')
 
-            # cover decode_output with out
-            decode_output.copy_(out)
+            ### Use flash_attn_with_kvcache for comparison
+            # output_fa = torch.empty_like(decode_output)  # [B, N, d]
+            # (seq_lens_arg, _, block_tables_arg) = (
+            #     get_seq_len_block_table_args(decode_meta, False, attn_type))
+            #
+            # flash_attn_with_kvcache(
+            #     q=decode_query.unsqueeze(1),
+            #     k_cache=key_cache,
+            #     v_cache=value_cache,
+            #     block_table=block_tables_arg,
+            #     cache_seqlens=seq_lens_arg,
+            #     softmax_scale=softmax_scale,
+            #     causal=True,
+            #     out=output_fa.unsqueeze(1)
+            # )
+            # if (output_fa - decode_output).abs().max() > 3e-4:
+            #     logger.info(f'[zhixin] max diff (pa-va): {(output_fa - decode_output).abs().max()}')
+            #     logger.info(f'[zhixin] mean diff (pa-va): {(output_fa - decode_output).abs().mean()}')
+
+        else:  # prefill only, just record
+            # _event_1.record()
+            # _event_2.record()
+            # _event_3.record()
+            ...
+
+        # _event_4.record()
+        # torch.cuda.synchronize(query.device)
+        # logger.info(f"[zhixin] PA sche | sort | fwd | sort | tot: "
+        #             f"{1000*(_event_0.elapsed_time(_event_1)):.2f} us | "
+        #             f"{1000*(_event_1.elapsed_time(_event_2)):.2f} us | "
+        #             f"{1000*(_event_2.elapsed_time(_event_3)):.2f} us | "
+        #             f"{1000*(_event_3.elapsed_time(_event_4)):.2f} us | "
+        #             f"{1000*(_event_0.elapsed_time(_event_4)):.2f} us | ")
 
         return output
 
 
 def _get_query_key_seq_metadata(
-    attn_metadata,
-    is_prompt: bool,
-    attn_type: str,
+        attn_metadata,
+        is_prompt: bool,
+        attn_type: str,
 ) -> tuple:
     """
     Returns sequence metadata for key and query based on the specified
