@@ -1703,6 +1703,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         ModelInputForGPUWithSamplingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
+    decode_step = 0
+
     def make_model_input_from_broadcasted_tensor_dict(
         self,
         tensor_dict: Dict[str, Any],
@@ -1838,8 +1840,29 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config, virtual_engine):
+            # if model_input.attn_metadata.num_decode_tokens > 0:
+            #     self.decode_step += 1  # zhixin: debug
+            # logger.info(f'[zhixin] model_runner fwd context (decode step {self.decode_step}): '
+            #                f'n_prefill={model_input.attn_metadata.num_prefills}, '
+            #                f'n_decode={model_input.attn_metadata.num_decode_tokens}')
+            with (set_forward_context(model_input.attn_metadata,
+                                     self.vllm_config, virtual_engine)):
+
+                # if hasattr(decode_meta, 'packed_box') and decode_meta.packed_box.sort_index is not None:
+                #     logger.warning(f'[sort] {decode_meta.packed_box.sort_index}')
+                #     # logger.info(f'[zhixin] model_runner decode_meta: {decode_meta.packed_box}')
+                #     # logger.info(f'[zhixin] model_input.input_tokens: {model_input.input_tokens}')
+                #     # logger.info(f'[zhixin] model_input.input_positions: {model_input.input_positions}')
+                #
+                #     # sort decode tokens by packed box
+                #     prefill_tokens = model_input.attn_metadata.num_prefill_tokens
+                #     model_input.input_tokens[prefill_tokens:] = \
+                #         model_input.input_tokens[prefill_tokens:][decode_meta.packed_box.sort_index]
+                #     model_input.input_positions[prefill_tokens:] = \
+                #         model_input.input_positions[prefill_tokens:][decode_meta.packed_box.sort_index]
+                #     # print(f'[zhixin] model_input.input_tokens after sort: {model_input.input_tokens}')
+                #     # print(f'[zhixin] model_input.input_positions after sort: {model_input.input_positions}')
+
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     inputs_embeds=model_input.inputs_embeds,
@@ -1853,6 +1876,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     **seqlen_agnostic_kwargs,
                     **model_kwargs,
                 )
+
+                # # reverse the output
+                # if hasattr(decode_meta, 'packed_box') and decode_meta.packed_box.reverse_index is not None:
+                #     logger.warning(f'[reverse] {decode_meta.packed_box.reverse_index}')
+                #     # logger.info(f'[zhixin] output shape: {hidden_or_intermediate_states.shape}')
+                #     prefill_tokens = model_input.attn_metadata.num_prefill_tokens
+                #     hidden_or_intermediate_states[prefill_tokens:] = \
+                #         hidden_or_intermediate_states[prefill_tokens:][decode_meta.packed_box.reverse_index]
+                #     # logger.info(f'[zhixin] output after reverse: {hidden_or_intermediate_states.shape}')
+
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
@@ -1962,6 +1995,8 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states
 
             output.hidden_states = hidden_states
+
+        # logger.info(f'[zhixin] sampled output tokens: {[_.samples[0].output_token for _ in output.outputs]}')
 
         return [output]
 
