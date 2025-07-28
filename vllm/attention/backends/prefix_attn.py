@@ -4,8 +4,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from itertools import accumulate
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
-
 import torch
+from concurrent.futures import Future
 
 from vllm import _custom_ops as ops
 # yapf conflicts with isort for this block
@@ -32,7 +32,7 @@ from vllm.vllm_flash_attn import (flash_attn_varlen_func,
 
 from prefix_attn import prefix_attn_with_kvcache, schedule, schedule_naive
 from prefix_attn.data_class import PackedBox, KernelInfo
-from prefix_attn.prefix_tree import PrefixTree
+from prefix_attn.prefix_tree import PrefixTree, AsyncPrefixTreeScheduler
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -168,6 +168,11 @@ class PrefixAttentionMetadata(AttentionMetadata):
     block_tables: Optional[torch.Tensor]
     block_size: Optional[int]
 
+    # Whether or not if cuda graph is enabled.
+    # Cuda-graph is currently enabled for decoding only.
+    # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
+    use_cuda_graph: bool
+
     # nheads, nheads_kv used for prefix scheduling.
     # they should be set before getting decode AttentionMetadata.
     nheads = None
@@ -175,13 +180,8 @@ class PrefixAttentionMetadata(AttentionMetadata):
 
     # prefix_attn.data_class.PackedBox
     # used only for decode attention metadata
-    packed_box: Optional[KernelInfo]
-
-    # Whether or not if cuda graph is enabled.
-    # Cuda-graph is currently enabled for decoding only.
-    # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
-
-    use_cuda_graph: bool
+    _packed_box: Optional[KernelInfo] = None
+    _packed_box_future: Optional[Future] = None
 
     # Maximum query length in the batch.
     max_query_len: Optional[int] = None
@@ -219,6 +219,18 @@ class PrefixAttentionMetadata(AttentionMetadata):
     # and block tables
     cross_slot_mapping: Optional[torch.Tensor] = None
     cross_block_tables: Optional[torch.Tensor] = None
+
+    @property
+    def packed_box(self) -> Optional[KernelInfo]:
+        if self._packed_box is None and self._packed_box_future is not None:
+            # get result from future
+            with Timer("tree schedule (wait)", sync_gpu=False, disable=True):
+                self._packed_box = self._packed_box_future.result()
+        return self._packed_box
+
+    @packed_box.setter
+    def packed_box(self, value: Optional[KernelInfo]):
+        self._packed_box = value
 
     @property
     def is_all_encoder_attn_metadata_set(self):
@@ -285,7 +297,7 @@ class PrefixAttentionMetadata(AttentionMetadata):
             block_tables=block_tables,
             block_size=self.block_size,
             use_cuda_graph=False,
-            packed_box=None,
+            # packed_box=None,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
@@ -325,16 +337,38 @@ class PrefixAttentionMetadata(AttentionMetadata):
         ## # policy-2: naive schedule
         # box: KernelInfo = schedule_naive(self.seq_lens[self.num_prefills:], block_tables)
 
-        ### policy-3: tree schedule
-        with Timer("tree schedule", sync_gpu=True, disable=True):
+        ### policy-3: tree schedule (async or sync)
+        with Timer("tree schedule (async)", sync_gpu=False, disable=True):
             MNWs = [[64, 128, 4], [64, 64, 4], [64, 32, 4], [64, 16, 4],
                     [32, 128, 2], [32, 64, 2], [32, 32, 2], [32, 16, 2],
                     [16, 128, 1], [16, 64, 1], [16, 32, 1], [16, 16, 1]]
-            block_tables_cpu = block_tables.cpu().tolist()
-            tree = PrefixTree(self.block_size)
-            tree.build_tree(np.arange(self.num_decode_tokens), block_tables_cpu)
-            box: KernelInfo = tree.pack_schedule(MNWs, self.nheads // self.nheads_kv if self.nheads_kv is not None else 64)
-            box.to_tensor(device=self.block_tables.device)
+            box_future = Future()
+            async_scheduler = AsyncPrefixTreeScheduler(
+                future=box_future,
+                block_tables=block_tables,
+                num_decode_tokens=self.num_decode_tokens,
+                block_size=self.block_size,
+                nheads=self.nheads,
+                nheads_kv=self.nheads_kv,
+                MNWs=MNWs
+            )
+            async_scheduler.start()
+
+            # disable async
+            # if True:
+            #     # logger.info('[zhixin] disable async tree schedule')
+            #     self._packed_box = box_future.result()
+
+        ### policy-3: tree schedule (sync backup)
+        # with Timer("tree schedule", sync_gpu=True, disable=False):
+        #     MNWs = [[64, 128, 4], [64, 64, 4], [64, 32, 4], [64, 16, 4],
+        #             [32, 128, 2], [32, 64, 2], [32, 32, 2], [32, 16, 2],
+        #             [16, 128, 1], [16, 64, 1], [16, 32, 1], [16, 16, 1]]
+        #     block_tables_cpu = block_tables.cpu().tolist()
+        #     tree = PrefixTree(self.block_size)
+        #     tree.build_tree(np.arange(self.num_decode_tokens), block_tables_cpu)
+        #     box: KernelInfo = tree.pack_schedule(MNWs, self.nheads // self.nheads_kv if self.nheads_kv is not None else 64)
+        #     box.to_tensor(device=self.block_tables.device)
 
         # logger.info(f"[zhixin] schedule time: {1000*(time.perf_counter() - _start):.4f} ms")
 
@@ -363,7 +397,7 @@ class PrefixAttentionMetadata(AttentionMetadata):
             block_tables=block_tables,  # used for comparison only
             block_size=self.block_size,
             use_cuda_graph=self.use_cuda_graph,
-            packed_box=box,
+            # packed_box=box,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
@@ -371,6 +405,7 @@ class PrefixAttentionMetadata(AttentionMetadata):
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
             cross_block_tables=self.cross_block_tables)
+        self._cached_decode_metadata._packed_box_future = box_future
         return self._cached_decode_metadata
 
     # zhixin: support multi-step inference
@@ -643,7 +678,7 @@ class PrefixAttentionMetadataBuilder(
             block_tables=block_tables,
             block_size=self.block_size,
             use_cuda_graph=use_captured_graph,
-            packed_box=None,
+            # packed_box=None,
         )
 
 
