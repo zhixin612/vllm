@@ -6,6 +6,7 @@ from itertools import accumulate
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
+from prefix_attn import prefix_attn_with_kvcache
 
 from vllm import _custom_ops as ops
 # yapf conflicts with isort for this block
@@ -274,6 +275,9 @@ class FlashAttentionMetadata(AttentionMetadata):
                            self.seq_lens_tensor[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[self.num_prefills:])
+
+        # logger.info(f'[zhixin] (A) original block table: \n{block_tables}'
+        #             f'\nseq_lens: {seq_lens_tensor}')
 
         self._cached_decode_metadata = FlashAttentionMetadata(
             num_prefills=0,
@@ -854,10 +858,18 @@ class FlashAttentionImpl(AttentionImpl):
                     v_descale=layer._v_scale.expand(descale_shape),
                 )
 
+        # _start_event = torch.cuda.Event(enable_timing=True)
+        # _mid_event = torch.cuda.Event(enable_timing=True)
+        # _end_event = torch.cuda.Event(enable_timing=True)
+        # torch.cuda.synchronize(query.device)
+        # _start_event.record()
+
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
             # Use flash_attn_varlen_func kernel for speculative decoding
             # because different queries might have different lengths.
+
+            # _mid_event.record()
 
             assert decode_meta.max_decode_query_len is not None
             # use only for actual varlen decoding
@@ -890,12 +902,10 @@ class FlashAttentionImpl(AttentionImpl):
                 )
             else:
                 # Use flash_attn_with_kvcache for normal decoding.
-                (
-                    seq_lens_arg,
-                    _,
-                    block_tables_arg,
-                ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
+                (seq_lens_arg, _, block_tables_arg) = (
+                    get_seq_len_block_table_args(decode_meta, False, attn_type))
                 descale_shape = (seq_lens_arg.shape[0], key_cache.shape[-2])
+
                 flash_attn_with_kvcache(
                     q=decode_query.unsqueeze(1),
                     k_cache=key_cache,
@@ -913,6 +923,40 @@ class FlashAttentionImpl(AttentionImpl):
                     k_descale=layer._k_scale.expand(descale_shape),
                     v_descale=layer._v_scale.expand(descale_shape),
                 )
+
+                # device = query.device
+                # out = prefix_attn_with_kvcache(
+                #     q=decode_query.unsqueeze(1),
+                #     k_cache_paged=key_cache,
+                #     v_cache_paged=value_cache,
+                #     query_tables=torch.range(0, num_decode_query_tokens - 1, device=device, dtype=torch.int32),
+                #     block_tables=block_tables_arg,
+                #     num_seqs_per_CTA=torch.ones(num_decode_query_tokens, device=device, dtype=torch.int32),
+                #     num_split_per_seq=torch.ones(num_decode_query_tokens, device=device, dtype=torch.int32),
+                #     CTA_rank=torch.zeros(num_decode_query_tokens, device=device, dtype=torch.int32),
+                #     kv_in_CTA=seq_lens_arg,
+                #     max_split_per_seq=1,
+                #     max_seqs_in_CTA=1,
+                #     max_blocks_in_CTA=block_tables_arg.shape[1],
+                #     softmax_scale=softmax_scale,
+                # )
+                # out = out.squeeze()
+
+                # logger.warning(f'[zhixin] shapge of pa & fa: {out.shape} {decode_output.shape}')
+                # logger.warning(f'[zhixin] max diff (pa-fa): {(out-decode_output).abs().max()}')
+                # logger.warning(f'[zhixin] mean diff (pa-fa): {(out-decode_output).abs().mean()}')
+
+        else:
+            # _mid_event.record()
+            ...
+
+        # _end_event.record()
+        # torch.cuda.synchronize(query.device)
+        # logger.info(f"[zhixin] FA sche | forward | total: "
+        #             f"{1000*(_start_event.elapsed_time(_mid_event)):.2f} us | "
+        #             f"{1000*(_mid_event.elapsed_time(_end_event)):.2f} us | "
+        #             f"{1000*(_start_event.elapsed_time(_end_event)):.2f} us")
+
         return output
 
 
