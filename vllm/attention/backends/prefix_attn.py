@@ -179,8 +179,8 @@ class PrefixAttentionMetadata(AttentionMetadata):
 
     # nheads, nheads_kv used for prefix scheduling.
     # they should be set before getting decode AttentionMetadata.
-    nheads = None
-    nheads_kv = None
+    nheads: int
+    nheads_kv: int
 
     # prefix_attn.data_class.PackedBox
     # used only for decode attention metadata
@@ -302,6 +302,8 @@ class PrefixAttentionMetadata(AttentionMetadata):
             block_tables_cpu=None,
             block_size=self.block_size,
             use_cuda_graph=False,
+            nheads=self.nheads,
+            nheads_kv=self.nheads_kv,
             # packed_box=None,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
@@ -356,6 +358,8 @@ class PrefixAttentionMetadata(AttentionMetadata):
             # MNWs = [[64, 128, 4], [64, 64, 4], [64, 32, 4], [64, 16, 4],
             #         [32, 128, 2], [32, 64, 2], [32, 32, 2], [32, 16, 2],
             #         [16, 128, 1], [16, 64, 1], [16, 32, 1], [16, 16, 1]]
+            assert self.nheads is not None and self.nheads_kv is not None, \
+                "nheads and nheads_kv must be set before getting decode metadata"
             async_scheduler = AsyncPrefixTreeScheduler(
                 future=box_future,
                 # block_tables=make_ndarray_with_pad(block_tables_cpu, 0, np.int32).tolist(),
@@ -416,6 +420,8 @@ class PrefixAttentionMetadata(AttentionMetadata):
             block_tables_cpu=None,
             block_size=self.block_size,
             use_cuda_graph=self.use_cuda_graph,
+            nheads=self.nheads,
+            nheads_kv=self.nheads_kv,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
@@ -699,6 +705,8 @@ class PrefixAttentionMetadataBuilder(
             block_size=self.block_size,
             use_cuda_graph=use_captured_graph,
             # packed_box=None,
+            nheads=None,  # [zhixin] set before getting decode metadata (PrefixAttentionImpl.forward)
+            nheads_kv=None,
         )
 
 
@@ -922,8 +930,6 @@ class PrefixAttentionImpl(AttentionImpl):
         # _event_0.record()
 
         # set num heads for prefix scheduling
-        attn_metadata.nheads = self.num_heads
-        attn_metadata.nheads_kv = self.num_kv_heads
         if decode_meta := attn_metadata.decode_metadata:
             # _event_1.record()
             assert decode_meta.max_decode_query_len <= 1, \
