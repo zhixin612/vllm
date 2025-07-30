@@ -21,6 +21,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen3 model compatible with HuggingFace weights."""
+import time
 from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
@@ -48,6 +49,8 @@ from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader, PPMissingLayer, maybe_prefix
 
 logger = init_logger(__name__)
+
+from nvtx import nvtx
 
 
 class Qwen3Attention(nn.Module):
@@ -140,7 +143,15 @@ class Qwen3Attention(nn.Module):
         k_by_head = self.k_norm.forward_native(k_by_head)
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
+
+        # _start = time.perf_counter()
+        # rng = nvtx.start_range(message='generate', color='red')
         attn_output = self.attn(q, k, v)
+        # nvtx.end_range(rng)
+        # torch.cuda.synchronize()
+        # _end = time.perf_counter()
+        # print('attn_latency = {:.3f} ms'.format((_end - _start) * 1000))
+
         output, _ = self.o_proj(attn_output)
         return output
 
