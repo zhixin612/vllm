@@ -815,6 +815,11 @@ def get_dp_group() -> GroupCoordinator:
     assert _DP is not None, ("data parallel group is not initialized")
     return _DP
 
+_EP: Optional[GroupCoordinator] = None
+
+def get_ep_group() -> GroupCoordinator:
+    assert _EP is not None, ("expert parallel group is not initialized")
+    return _EP
 
 def get_pp_group() -> GroupCoordinator:
     assert _PP is not None, (
