@@ -230,6 +230,9 @@ class CudaPlatformBase(Platform):
         elif selected_backend == _Backend.PREFIX_ATTN:
             logger.info("Using PREFIX_ATTN backend.")
             return "vllm.attention.backends.prefix_attn.PrefixAttentionBackend"
+        elif selected_backend == _Backend.RELAY_ATTN:
+            logger.info("Using RELAY_ATTN backend.")
+            return "vllm.attention.backends.relay_attn.RelayAttentionBackend"
         elif selected_backend == _Backend.FLASH_ATTN:
             pass
         elif selected_backend:
