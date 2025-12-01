@@ -131,6 +131,9 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        torch.cuda.synchronize()
+        _start = time.perf_counter()
+
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
@@ -144,15 +147,29 @@ class Qwen3Attention(nn.Module):
         k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
 
-        # _start = time.perf_counter()
-        # rng = nvtx.start_range(message='generate', color='red')
+        torch.cuda.synchronize()
+        _end = time.perf_counter()
+        print('[latency] QKV {:.6f}'.format(1000 * (_end - _start)))
+
+
+        torch.cuda.synchronize()
+        _start = time.perf_counter()
+
         attn_output = self.attn(q, k, v)
-        # nvtx.end_range(rng)
-        # torch.cuda.synchronize()
-        # _end = time.perf_counter()
-        # print('attn_latency = {:.3f} ms'.format((_end - _start) * 1000))
+
+        torch.cuda.synchronize()
+        _end = time.perf_counter()
+        print('[latency] attn {:.6f}'.format(1000 * (_end - _start)))
+
+
+        torch.cuda.synchronize()
+        _start = time.perf_counter()
 
         output, _ = self.o_proj(attn_output)
+
+        torch.cuda.synchronize()
+        _end = time.perf_counter()
+        print('[latency] out {:.6f}'.format(1000 * (_end - _start)))
         return output
 
 
@@ -226,9 +243,17 @@ class Qwen3DecoderLayer(nn.Module):
         )
 
         # Fully Connected
+        torch.cuda.synchronize()
+        _start = time.perf_counter()
+
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
+
+        torch.cuda.synchronize()
+        _end = time.perf_counter()
+        print('[latency] MLP {:.6f}'.format(1000 * (_end - _start)))
+
         return hidden_states, residual
 
 
@@ -307,8 +332,12 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+
+        print('[step_start]----------------')
+
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds)
+        print('[step_stop]----------------')
         return hidden_states
 
     def compute_logits(

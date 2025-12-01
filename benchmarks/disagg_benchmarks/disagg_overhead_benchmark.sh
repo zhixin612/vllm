@@ -1,5 +1,10 @@
 #!/bin/bash
 
+export CUDA_VISIBLE_DEVICES=4,5,6,7
+export VLLM_USE_V1=0
+#export VLLM_ATTENTION_BACKEND="FLASH_ATTN"
+export VLLM_ATTENTION_BACKEND="PREFIX_ATTN"
+
 # benchmark the overhead of disaggregated prefill.
 # methodology:
 # - send all request to prefill vLLM instance. It will buffer KV cache.
@@ -58,7 +63,7 @@ benchmark() {
     --model $model \
     --port 8100 \
     --max-model-len 10000 \
-    --gpu-memory-utilization 0.6 \
+    --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
     '{"kv_connector":"PyNcclConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
     
@@ -68,7 +73,7 @@ benchmark() {
     --model $model \
     --port 8200 \
     --max-model-len 10000 \
-    --gpu-memory-utilization 0.6 \
+    --gpu-memory-utilization 0.8 \
     --kv-transfer-config \
     '{"kv_connector":"PyNcclConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2,"kv_buffer_size":5e9}' &
 
