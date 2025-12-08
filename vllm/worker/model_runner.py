@@ -1738,13 +1738,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
 
-        # [zhixin]: Set nheads and nheads_kv for prefix-attn
-        if hasattr(model_input.attn_metadata, 'nheads'):
-            model_input.attn_metadata.nheads \
-                = self.model_config.get_num_attention_heads(self.parallel_config)
-            model_input.attn_metadata.nheads_kv \
-                = self.model_config.get_num_kv_heads(self.parallel_config)
-
         if get_pp_group().is_last_rank:
             # Sampling metadata is only required for the final pp group
             generators = self.get_generators(finished_requests_ids)
