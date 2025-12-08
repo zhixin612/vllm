@@ -172,6 +172,7 @@ class PrefixAttentionMetadata(AttentionMetadata):
     # in the kv cache. Each block can contain up to block_size tokens.
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
+    block_tables_cpu: Optional[torch.Tensor]
     block_tables: Optional[torch.Tensor]
     block_table_list: Optional[List[List[int]]]  # [zhixin] used for prefix scheduler
     block_size: Optional[int]
@@ -307,6 +308,7 @@ class PrefixAttentionMetadata(AttentionMetadata):
             seq_start_loc=seq_start_loc,
             context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
+            block_tables_cpu=None,
             block_table_list=None,
             block_size=self.block_size,
             use_cuda_graph=False,
@@ -342,9 +344,9 @@ class PrefixAttentionMetadata(AttentionMetadata):
                         self.block_table_list[self.num_prefills:])
         
         _start = time.perf_counter()
-        block_table_cpu = (None if self.block_tables is None else
-                        torch.from_numpy(make_ndarray_with_pad(block_table_list, 0, np.int32)))
-        print(f"[zhixin] block_table_cpu preparation time: {1000*(time.perf_counter() - _start):.4f} ms")
+        # block_table_cpu = (None if self.block_tables is None else
+        #                 torch.from_numpy(make_ndarray_with_pad(block_table_list, 0, np.int32)))
+        # print(f"[zhixin] block_table_cpu preparation time: {1000*(time.perf_counter() - _start):.4f} ms")
         
         # [zhixin: PAT v1]
         # TODO(zhixin): this may be further overlapped through moving to PrefixAttentionMetadataBuilder.build()
@@ -354,7 +356,7 @@ class PrefixAttentionMetadata(AttentionMetadata):
         tree = AsyncTree(
             block_size=self.block_size,
             seq_lens=self.seq_lens[self.num_prefills:],
-            table=block_table_cpu,
+            table=self.block_tables_cpu,
             MNWs=None,
             HRatio=self.nheads // (self.nheads_kv if self.nheads_kv is not None else 64),
             kvHead=self.nheads_kv,
@@ -458,6 +460,7 @@ class PrefixAttentionMetadata(AttentionMetadata):
             if self.seq_start_loc is not None else None,
             context_lens_tensor=None,
             block_tables=block_tables,  # used for comparison only
+            block_tables_cpu=None,
             block_table_list=None,
             block_size=self.block_size,
             use_cuda_graph=self.use_cuda_graph,
@@ -701,12 +704,27 @@ class PrefixAttentionMetadataBuilder(
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
         else:
-            block_tables = make_tensor_with_pad(
-                self.block_tables,
-                pad=0,
-                dtype=torch.int,
-                device=device,
-            )
+            if self.num_prefills > 0:
+                block_tables_gpu = make_tensor_with_pad(
+                    self.block_tables,
+                    pad=0,
+                    dtype=torch.int,
+                    device=device,
+                )
+                block_tables_cpu = None
+            
+            else:
+                block_tables_cpu = make_tensor_with_pad(
+                    self.block_tables,
+                    pad=0,
+                    dtype=torch.int,
+                    device="cpu",
+                )
+                # st = time.time()
+                block_tables_gpu = block_tables_cpu.to(device=device, non_blocking=True)
+                # ed = time.time()
+                # logger.info(f"block_tables to GPU time: {1000*(ed - st):.4f} ms")
+
         assert max_query_len > 0, ("query_lens: {}".format(query_lens))
 
         assert device is not None
@@ -743,7 +761,8 @@ class PrefixAttentionMetadataBuilder(
             query_start_loc=query_start_loc_tensor,
             seq_start_loc=seq_start_loc_tensor,
             context_lens_tensor=context_lens_tensor,
-            block_tables=block_tables,
+            block_tables_cpu=block_tables_cpu if not use_captured_graph else None,
+            block_tables=block_tables_gpu,
             block_table_list=self.block_tables,  # TODO(zhixin): make a copy?
             block_size=self.block_size,
             use_cuda_graph=use_captured_graph,
