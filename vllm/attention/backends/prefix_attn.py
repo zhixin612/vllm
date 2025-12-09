@@ -182,12 +182,9 @@ class PrefixAttentionMetadata(AttentionMetadata):
 
     # [zhixin: PAT v1]
     tree: Optional[AsyncTree]
-
-    # [zhixin: PAT v0]
-    # prefix_attn.data_class.PackedBox
-    # used only for decode attention metadata
-    # _packed_box: Optional[KernelInfo] = None
-    # _packed_box_future: Optional[Future] = None
+    block_tables_cpu: Optional[torch.Tensor] = None
+    nheads: Optional[int] = None
+    nheads_kv: Optional[int] = None
 
     # Maximum query length in the batch.
     max_query_len: Optional[int] = None
@@ -330,6 +327,15 @@ class PrefixAttentionMetadata(AttentionMetadata):
                         self.block_tables[self.num_prefills:])
 
         # logger.info(f"[zhixin] schedule time: {1000*(time.perf_counter() - _start):.4f} ms")
+        tree = AsyncTree(
+            block_size=self.block_size,
+            seq_lens=self.seq_lens[self.num_prefills:],
+            table=self.block_tables_cpu,
+            MNWs=None,
+            HRatio=self.nheads // self.nheads_kv,
+            kvHead=self.nheads_kv,
+            device=self.block_tables.device
+        )
 
         self._cached_decode_metadata = PrefixAttentionMetadata(
             num_prefills=0,
@@ -356,7 +362,8 @@ class PrefixAttentionMetadata(AttentionMetadata):
             block_tables=block_tables,  # used for comparison only
             block_size=self.block_size,
             use_cuda_graph=self.use_cuda_graph,
-            tree=self.tree,  # [zhixin: PAT v1]
+            # tree=self.tree,  # [zhixin: PAT v1 - AsyncTree from builder]
+            tree=tree,  # [zhixin: PAT v1 - AsyncTree from Metadata]
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
@@ -364,9 +371,6 @@ class PrefixAttentionMetadata(AttentionMetadata):
             max_encoder_seq_len=self.max_encoder_seq_len,
             cross_slot_mapping=self.cross_slot_mapping,
             cross_block_tables=self.cross_block_tables)
-        # [zhixin: PAT v0]
-        # self._cached_decode_metadata._packed_box = box
-        # self._cached_decode_metadata._packed_box_future = box_future
         return self._cached_decode_metadata
 
     # zhixin: support multi-step inference
@@ -614,15 +618,15 @@ class PrefixAttentionMetadataBuilder(
                 n_heads_kv = self.runner.model_config.get_num_kv_heads(self.runner.parallel_config)
                 assert n_heads is not None and n_heads_kv is not None, \
                     "n_heads and n_heads_kv must be known for building prefix tree"
-                prefix_tree = AsyncTree(
-                    block_size=self.block_size,
-                    seq_lens=seq_lens[self.num_prefills:],
-                    table=block_tables_cpu,
-                    MNWs=None,
-                    HRatio= n_heads // n_heads_kv,
-                    kvHead=n_heads_kv,
-                    device=device
-                )
+                # prefix_tree = AsyncTree(
+                #     block_size=self.block_size,
+                #     seq_lens=seq_lens[self.num_prefills:],
+                #     table=block_tables_cpu,
+                #     MNWs=None,
+                #     HRatio= n_heads // n_heads_kv,
+                #     kvHead=n_heads_kv,
+                #     device=device
+                # )
                 
                 # --- sync tree build (for debug & comparison) ---
                 # tree = PrefixTreeCPP(self.block_size)
@@ -673,7 +677,12 @@ class PrefixAttentionMetadataBuilder(
             block_tables=block_tables,
             block_size=self.block_size,
             use_cuda_graph=use_captured_graph,
-            tree=prefix_tree if self.num_prefills == 0 else None,
+            # [zhixin: PAT v1]
+            # tree=prefix_tree if self.num_prefills == 0 else None,  # AsyncTree from builder
+            tree=None,  # AsyncTree from Metadata
+            block_tables_cpu=block_tables_cpu if self.num_prefills == 0 else None,
+            nheads=n_heads if self.num_prefills == 0 else None,
+            nheads_kv=n_heads_kv if self.num_prefills == 0 else None
         )
 
 
